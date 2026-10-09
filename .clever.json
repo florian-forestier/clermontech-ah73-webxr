@@ -1,0 +1,12 @@
+{
+  "apps": [
+    {
+      "app_id": "app_90b67a8d-8146-4b1c-85c8-d4c6358cb692",
+      "org_id": "user_2c42f38a-0f65-4e83-971e-5fb5fd6db845",
+      "deploy_url": "https://push-n3-par-clevercloud-customers.services.clever-cloud.com/app_90b67a8d-8146-4b1c-85c8-d4c6358cb692.git",
+      "git_ssh_url": "git+ssh://git@push-n3-par-clevercloud-customers.services.clever-cloud.com/app_90b67a8d-8146-4b1c-85c8-d4c6358cb692.git",
+      "name": "clermontech-webxr",
+      "alias": "clermontech-webxr"
+    }
+  ]
+}
