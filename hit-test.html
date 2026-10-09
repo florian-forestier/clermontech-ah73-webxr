@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>WebXR AR – Hit-test</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+    #intro { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 8px; }
+    #intro h1 { margin: 0; font-size: 1.6rem; }
+    #intro p { margin: 0; opacity: .75; max-width: 32em; }
+
+    /* DOM Overlay : affiché par-dessus le flux caméra pendant la session AR */
+    #overlay { display: none; position: absolute; inset: 0; pointer-events: none; }
+    #overlay.active { display: block; }
+    #hint { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 999px; font-size: .95rem; white-space: nowrap; }
+    #status { position: absolute; top: 56px; left: 50%; transform: translateX(-50%); font-size: .8rem; opacity: .8; white-space: nowrap; }
+    #controls { position: absolute; bottom: 24px; left: 0; right: 0; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 0 16px; pointer-events: auto; }
+    #controls button { background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.35); border-radius: 12px; padding: 10px 14px; font-size: .95rem; }
+    #controls button:active { background: rgba(255,255,255,.25); }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="intro">
+    <h1>🎯 Hit-test</h1>
+    <p>La démo WebXR de base : un réticule suit les surfaces détectées, chaque tap y pose un objet.<br />Balayez doucement la pièce avec le téléphone pour aider la détection.</p>
+  </div>
+
+  <div id="overlay">
+    <div id="hint">Balayez la pièce pour détecter une surface…</div>
+    <div id="status"></div>
+    <div id="controls">
+      <button id="mode">🧱 Plans + points</button>
+      <button id="undo">↩️ Annuler</button>
+      <button id="clear">🗑️ Tout effacer</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+    // ---------- Renderer / scène ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 2.5));
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    sunLight.position.set(1, 3, 2);
+    scene.add(sunLight);
+
+    // ---------- Bouton AR (hit-test requis, dom-overlay optionnel) ----------
+    const overlay = document.getElementById('overlay');
+    document.body.appendChild(ARButton.createButton(renderer, {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: overlay },
+    }));
+
+    // ---------- Réticule ----------
+    const reticle = new THREE.Group();
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    const reticleMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+    reticle.add(new THREE.Mesh(new THREE.RingGeometry(0.06, 0.075, 40).rotateX(-Math.PI / 2), reticleMat));
+    reticle.add(new THREE.Mesh(new THREE.CircleGeometry(0.01, 16).rotateX(-Math.PI / 2), reticleMat));
+    scene.add(reticle);
+
+    // ---------- Objets posés ----------
+    const SHAPES = [
+      () => new THREE.BoxGeometry(0.08, 0.08, 0.08).translate(0, 0.04, 0),
+      () => new THREE.ConeGeometry(0.045, 0.1, 24).translate(0, 0.05, 0),
+      () => new THREE.SphereGeometry(0.045, 24, 16).translate(0, 0.045, 0),
+      () => new THREE.CylinderGeometry(0.04, 0.04, 0.09, 24).translate(0, 0.045, 0),
+      () => new THREE.TorusKnotGeometry(0.03, 0.01, 64, 8).translate(0, 0.05, 0),
+    ];
+    const placed = [];
+    let shapeIndex = 0;
+
+    function placeObject(matrix) {
+      const mesh = new THREE.Mesh(
+        SHAPES[shapeIndex++ % SHAPES.length](),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.75, 0.55), roughness: 0.4, metalness: 0.1 })
+      );
+      matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      mesh.scale.setScalar(0.01); // petite animation d'apparition
+      mesh.userData.born = performance.now();
+      scene.add(mesh);
+      placed.push(mesh);
+    }
+
+    // ---------- UI (DOM overlay) ----------
+    const hint = document.getElementById('hint');
+    const status = document.getElementById('status');
+    const modeBtn = document.getElementById('mode');
+
+    document.getElementById('undo').addEventListener('click', () => {
+      const m = placed.pop();
+      if (m) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+    });
+    document.getElementById('clear').addEventListener('click', () => {
+      for (const m of placed) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); }
+      placed.length = 0;
+    });
+
+    // Un tap sur un bouton du DOM overlay ne doit pas déclencher un "select" XR (et donc poser un objet)
+    document.getElementById('controls').addEventListener('beforexrselect', (e) => e.preventDefault());
+
+    // ---------- Hit-test ----------
+    // On demande les plans ET les points caractéristiques : sur un téléphone qui peine à
+    // reconnaître des plans (surface unie, peu de lumière), les points donnent un résultat bien plus vite.
+    // Le bouton "mode" permet de revenir aux plans seuls pour comparer.
+    let hitTestSource = null;
+    let usePoints = true;
+    let viewerSpace = null;
+
+    async function requestSource() {
+      const session = renderer.xr.getSession();
+      if (!session || !viewerSpace) return;
+      hitTestSource?.cancel();
+      hitTestSource = null;
+      const entityTypes = usePoints ? ['plane', 'point'] : ['plane'];
+      try {
+        hitTestSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes });
+      } catch (err) {
+        // entityTypes n'est pas supporté partout : on retombe sur la requête minimale
+        console.warn('entityTypes refusé, hit-test par défaut', err);
+        hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      }
+    }
+
+    modeBtn.addEventListener('click', () => {
+      usePoints = !usePoints;
+      modeBtn.textContent = usePoints ? '🧱 Plans + points' : '🧱 Plans seuls';
+      requestSource();
+    });
+
+    // ---------- Interaction : tap = poser un objet ----------
+    // Filet de sécurité : sans surface détectée, l'objet est posé à 1 m devant la caméra.
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (reticle.visible) {
+        placeObject(reticle.matrix);
+      } else {
+        const m = new THREE.Matrix4();
+        const pos = new THREE.Vector3(0, 0, -1).applyMatrix4(camera.matrixWorld);
+        const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+        m.makeRotationY(Math.atan2(camPos.x - pos.x, camPos.z - pos.z)).setPosition(pos);
+        placeObject(m);
+      }
+    });
+    scene.add(controller);
+
+    renderer.xr.addEventListener('sessionstart', async () => {
+      document.getElementById('intro').style.display = 'none';
+      overlay.classList.add('active');
+      viewerSpace = await renderer.xr.getSession().requestReferenceSpace('viewer');
+      await requestSource();
+    });
+    renderer.xr.addEventListener('sessionend', () => {
+      hitTestSource?.cancel();
+      hitTestSource = null;
+      viewerSpace = null;
+      overlay.classList.remove('active');
+      document.getElementById('intro').style.display = '';
+      reticle.visible = false;
+      hint.textContent = 'Balayez la pièce pour détecter une surface…';
+    });
+
+    // ---------- Boucle de rendu ----------
+    renderer.setAnimationLoop((timestamp, frame) => {
+      if (frame && hitTestSource) {
+        const hits = frame.getHitTestResults(hitTestSource);
+        if (hits.length) {
+          const pose = hits[0].getPose(renderer.xr.getReferenceSpace());
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+          hint.textContent = 'Touchez pour poser un objet';
+        } else {
+          reticle.visible = false;
+          hint.textContent = 'Pas de surface : un tap pose à 1 m devant';
+        }
+        status.textContent = `${hits.length} résultat(s) · ${placed.length} objet(s)`;
+      }
+
+      // Pulsation du réticule + apparition des objets
+      reticleMat.opacity = 0.65 + 0.3 * Math.sin(timestamp / 200);
+      const now = performance.now();
+      for (const m of placed) {
+        const t = Math.min(1, (now - m.userData.born) / 250);
+        if (t < 1 || m.scale.x !== 1) m.scale.setScalar(THREE.MathUtils.lerp(0.01, 1, 1 - (1 - t) ** 3));
+      }
+
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
