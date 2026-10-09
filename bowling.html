@@ -338,7 +338,14 @@
       overlay.classList.add('active');
       const session = renderer.xr.getSession();
       const viewerSpace = await session.requestReferenceSpace('viewer');
-      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      // Plans + points caractéristiques : accroche plus vite sur les surfaces unies / peu éclairées
+      try {
+        hitTestSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes: ['plane', 'point'] });
+      } catch (err) {
+        // entityTypes n'est pas supporté partout : on retombe sur la requête minimale
+        console.warn('entityTypes refusé, hit-test par défaut', err);
+        hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      }
     });
     renderer.xr.addEventListener('sessionend', () => {
       hitTestSource?.cancel();
