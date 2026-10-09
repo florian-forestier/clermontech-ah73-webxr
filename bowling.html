@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>WebXR AR – Bowling</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+    #intro { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 8px; }
+    #intro h1 { margin: 0; font-size: 1.6rem; }
+    #intro p { margin: 0; opacity: .75; max-width: 32em; }
+
+    #overlay { display: none; position: absolute; inset: 0; pointer-events: none; }
+    #overlay.active { display: block; }
+    #hint { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 999px; font-size: .95rem; white-space: nowrap; }
+    #score { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); font-size: 1.4rem; font-weight: 700; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
+    #banner { position: absolute; top: 40%; left: 0; right: 0; text-align: center; font-size: 3rem; font-weight: 900; text-shadow: 0 4px 16px rgba(0,0,0,.8); opacity: 0; transition: opacity .3s, transform .3s; transform: scale(.6); }
+    #banner.show { opacity: 1; transform: scale(1); }
+    #controls { position: absolute; bottom: 24px; left: 0; right: 0; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 0 16px; pointer-events: auto; }
+    #controls button { background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.35); border-radius: 12px; padding: 10px 14px; font-size: .95rem; }
+    #controls button:active { background: rgba(255,255,255,.25); }
+    #controls[hidden] { display: none; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/",
+        "cannon-es": "./vendor/cannon-es/cannon-es.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="intro">
+    <h1>🎳 Bowling en AR</h1>
+    <p>Visez le sol, touchez pour poser la piste, puis touchez l'écran pour lancer une boule dans la direction de votre doigt.</p>
+  </div>
+
+  <div id="overlay">
+    <div id="hint">Visez le sol…</div>
+    <div id="score"></div>
+    <div id="banner"></div>
+    <div id="controls" hidden>
+      <button id="reset">🔄 Nouvelles quilles</button>
+      <button id="move">📍 Déplacer la piste</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import * as CANNON from 'cannon-es';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+    // ---------- Dimensions (≈ 1/2 échelle d'un vrai bowling, piste raccourcie) ----------
+    const LANE_W = 0.6, LANE_L = 3.0;
+    const PIN_H = 0.19, PIN_R = 0.03, PIN_SPACING = 0.15, PIN_MASS = 0.4;
+    const BALL_R = 0.055, BALL_MASS = 2.5, THROW_SPEED = 5.5;
+    const MAX_BALLS = 4;
+
+    // ---------- Renderer / scène ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+
+    // Environnement pour des reflets crédibles sur la boule et les quilles
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(1024, 1024);
+    Object.assign(sunLight.shadow.camera, { left: -2, right: 2, top: 2, bottom: -2, near: 0.1, far: 8 });
+    sunLight.shadow.bias = -0.0005;
+    scene.add(sunLight, sunLight.target);
+
+    const overlay = document.getElementById('overlay');
+    document.body.appendChild(ARButton.createButton(renderer, {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: overlay },
+    }));
+
+    // ---------- Réticule ----------
+    const reticle = new THREE.Mesh(
+      new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
+    );
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    scene.add(reticle);
+
+    // ---------- Piste ----------
+    function laneTexture() {
+      const c = document.createElement('canvas');
+      c.width = 128; c.height = 1024;
+      const g = c.getContext('2d');
+      const planks = 16;
+      for (let i = 0; i < planks; i++) {
+        const l = 52 + Math.random() * 10;
+        g.fillStyle = `hsl(32, 55%, ${l}%)`;
+        g.fillRect((i * c.width) / planks, 0, c.width / planks + 1, c.height);
+      }
+      g.fillStyle = '#b3261e'; // ligne de faute
+      g.fillRect(0, 8, c.width, 6);
+      g.fillStyle = '#5a2d0c'; // flèches de visée
+      for (let i = 0; i < 7; i++) {
+        const x = ((i + 0.5) / 7) * c.width, y = 300 + Math.abs(i - 3) * 22;
+        g.beginPath(); g.moveTo(x, y); g.lineTo(x - 5, y + 24); g.lineTo(x + 5, y + 24); g.fill();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 8;
+      return tex;
+    }
+
+    const lane = new THREE.Group();
+    lane.visible = false;
+    scene.add(lane);
+
+    const laneMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(LANE_W, 0.004, LANE_L),
+      new THREE.MeshStandardMaterial({ map: laneTexture(), roughness: 0.25, metalness: 0 })
+    );
+    laneMesh.position.set(0, 0.002, LANE_L / 2);
+    laneMesh.receiveShadow = true;
+    lane.add(laneMesh);
+
+    // Rigoles (visuelles)
+    for (const side of [-1, 1]) {
+      const gutter = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 0.012, LANE_L),
+        new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.4, metalness: 0.3 })
+      );
+      gutter.position.set(side * (LANE_W / 2 + 0.03), 0.006, LANE_L / 2);
+      gutter.receiveShadow = true;
+      lane.add(gutter);
+    }
+
+    // Sol "invisible" qui ne reçoit que les ombres (ancre visuellement les objets dans le réel)
+    const shadowFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 8).rotateX(-Math.PI / 2),
+      new THREE.ShadowMaterial({ opacity: 0.35 })
+    );
+    shadowFloor.receiveShadow = true;
+    shadowFloor.position.z = LANE_L / 2;
+    lane.add(shadowFloor);
+
+    // ---------- Quille (géométrie de révolution) ----------
+    const pinGeometry = (() => {
+      const profile = [
+        [0, 0], [0.42, 0], [0.6, 0.06], [0.93, 0.24], [1, 0.34], [0.88, 0.5],
+        [0.5, 0.66], [0.42, 0.74], [0.52, 0.86], [0.48, 0.95], [0.25, 0.995], [0, 1],
+      ].map(([r, y]) => new THREE.Vector2(r * PIN_R, y * PIN_H));
+      const pts = new THREE.SplineCurve(profile).getPoints(60);
+      const geo = new THREE.LatheGeometry(pts, 32);
+      // Bandes rouges au niveau du col via les couleurs de sommets
+      const pos = geo.attributes.position, colors = [];
+      for (let i = 0; i < pos.count; i++) {
+        const t = pos.getY(i) / PIN_H;
+        const red = (t > 0.68 && t < 0.72) || (t > 0.755 && t < 0.79);
+        colors.push(...(red ? [0.75, 0.05, 0.05] : [1, 1, 1]));
+      }
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      geo.translate(0, -PIN_H / 2, 0); // centré comme le corps physique
+      geo.computeVertexNormals();
+      return geo;
+    })();
+    const pinMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.25, metalness: 0 });
+
+    // ---------- Physique ----------
+    const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+    world.allowSleep = true;
+    world.broadphase = new CANNON.SAPBroadphase(world);
+    world.defaultContactMaterial.friction = 0.25;
+    world.defaultContactMaterial.restitution = 0.3;
+
+    const floorBody = new CANNON.Body({ type: CANNON.Body.STATIC, shape: new CANNON.Plane() });
+    floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+    world.addBody(floorBody);
+
+    const pinShape = new CANNON.Cylinder(PIN_R * 0.55, PIN_R * 0.6, PIN_H, 12);
+    const ballShape = new CANNON.Sphere(BALL_R);
+
+    let pins = [];   // { mesh, body }
+    let balls = [];  // { mesh, body }
+    let throwsThisRack = 0, announced = false;
+
+    function clearObjects(list) {
+      for (const o of list) { scene.remove(o.mesh); world.removeBody(o.body); }
+      list.length = 0;
+    }
+
+    function setupPins() {
+      clearObjects(pins);
+      clearObjects(balls);
+      throwsThisRack = 0; announced = false;
+      lane.updateMatrixWorld(true);
+      const headZ = LANE_L - 0.55; // quille de tête
+      const rowDz = PIN_SPACING * Math.sqrt(3) / 2;
+      for (let row = 0; row < 4; row++) {
+        for (let i = 0; i <= row; i++) {
+          const local = new THREE.Vector3((i - row / 2) * PIN_SPACING, PIN_H / 2 + 0.004, headZ + row * rowDz);
+          const world_ = lane.localToWorld(local);
+
+          const mesh = new THREE.Mesh(pinGeometry, pinMaterial);
+          mesh.castShadow = true;
+          scene.add(mesh);
+
+          const body = new CANNON.Body({ mass: PIN_MASS, shape: pinShape, sleepSpeedLimit: 0.05, sleepTimeLimit: 0.5 });
+          body.position.set(world_.x, world_.y, world_.z);
+          body.quaternion.set(lane.quaternion.x, lane.quaternion.y, lane.quaternion.z, lane.quaternion.w);
+          body.linearDamping = 0.05; body.angularDamping = 0.1;
+          world.addBody(body);
+          body.sleep(); // stables tant qu'on ne les touche pas
+
+          pins.push({ mesh, body });
+        }
+      }
+      updateScore();
+    }
+
+    function throwBall(origin, direction) {
+      if (balls.length >= MAX_BALLS) {
+        const old = balls.shift();
+        scene.remove(old.mesh); world.removeBody(old.body);
+      }
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(BALL_R, 32, 24),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color().setHSL(Math.random(), 0.7, 0.35), roughness: 0.08, metalness: 0.2,
+        })
+      );
+      mesh.castShadow = true;
+      scene.add(mesh);
+
+      const start = origin.clone().addScaledVector(direction, 0.15);
+      const body = new CANNON.Body({ mass: BALL_MASS, shape: ballShape, linearDamping: 0.05, angularDamping: 0.05 });
+      body.position.set(start.x, start.y, start.z);
+      body.velocity.set(direction.x * THROW_SPEED, direction.y * THROW_SPEED, direction.z * THROW_SPEED);
+      world.addBody(body);
+
+      balls.push({ mesh, body });
+      throwsThisRack++;
+    }
+
+    // ---------- Score ----------
+    const scoreEl = document.getElementById('score');
+    const bannerEl = document.getElementById('banner');
+    const up = new THREE.Vector3();
+
+    function countFallen() {
+      return pins.filter(({ body }) => {
+        const q = body.quaternion;
+        up.set(0, 1, 0).applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w));
+        return up.y < 0.75 || body.position.y < floorBody.position.y + PIN_H * 0.3;
+      }).length;
+    }
+
+    function updateScore() {
+      const fallen = countFallen();
+      scoreEl.textContent = lane.visible ? `${fallen} / 10` : '';
+      if (fallen === 10 && !announced && throwsThisRack > 0) {
+        announced = true;
+        showBanner(throwsThisRack === 1 ? 'STRIKE ! 🎉' : throwsThisRack === 2 ? 'SPARE ! 👏' : 'Toutes tombées !');
+      }
+    }
+
+    let bannerTimer;
+    function showBanner(text) {
+      bannerEl.textContent = text;
+      bannerEl.classList.add('show');
+      clearTimeout(bannerTimer);
+      bannerTimer = setTimeout(() => bannerEl.classList.remove('show'), 2200);
+    }
+
+    // ---------- Interaction ----------
+    const hint = document.getElementById('hint');
+    const controls = document.getElementById('controls');
+    let placing = true;
+
+    function placeLane() {
+      const pos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+      const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      // La piste démarre au réticule et s'éloigne de l'utilisateur
+      lane.position.copy(pos);
+      lane.rotation.set(0, Math.atan2(pos.x - camPos.x, pos.z - camPos.z), 0);
+      lane.visible = true;
+
+      floorBody.position.y = pos.y;
+
+      const center = lane.localToWorld(new THREE.Vector3(0, 0, LANE_L / 2));
+      sunLight.position.copy(center).add(new THREE.Vector3(0.8, 3, 0.6));
+      sunLight.target.position.copy(center);
+
+      setupPins();
+      placing = false;
+      reticle.visible = false;
+      controls.hidden = false;
+      hint.textContent = 'Touchez pour lancer une boule 🎳';
+    }
+
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (placing) {
+        if (reticle.visible) placeLane();
+        return;
+      }
+      // Le rayon du "controller" correspond au point touché sur l'écran
+      const origin = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
+      const dir = new THREE.Vector3(0, 0, -1).transformDirection(controller.matrixWorld);
+      throwBall(origin, dir);
+    });
+    scene.add(controller);
+
+    controls.addEventListener('beforexrselect', (e) => e.preventDefault());
+    document.getElementById('reset').addEventListener('click', setupPins);
+    document.getElementById('move').addEventListener('click', () => {
+      placing = true;
+      lane.visible = false;
+      clearObjects(pins); clearObjects(balls);
+      controls.hidden = true;
+      scoreEl.textContent = '';
+      hint.textContent = 'Visez le sol…';
+    });
+
+    // ---------- Hit-test ----------
+    let hitTestSource = null;
+    renderer.xr.addEventListener('sessionstart', async () => {
+      document.getElementById('intro').style.display = 'none';
+      overlay.classList.add('active');
+      const session = renderer.xr.getSession();
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+    });
+    renderer.xr.addEventListener('sessionend', () => {
+      hitTestSource?.cancel();
+      hitTestSource = null;
+      overlay.classList.remove('active');
+      document.getElementById('intro').style.display = '';
+      placing = true;
+      lane.visible = false;
+      clearObjects(pins); clearObjects(balls);
+      controls.hidden = true;
+      scoreEl.textContent = '';
+      hint.textContent = 'Visez le sol…';
+    });
+
+    // ---------- Boucle ----------
+    const clock = new THREE.Clock();
+    let scoreTick = 0;
+
+    renderer.setAnimationLoop((timestamp, frame) => {
+      const dt = Math.min(clock.getDelta(), 0.1);
+
+      if (placing && frame && hitTestSource) {
+        const hits = frame.getHitTestResults(hitTestSource);
+        if (hits.length) {
+          const pose = hits[0].getPose(renderer.xr.getReferenceSpace());
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+          hint.textContent = 'Touchez pour poser la piste';
+        } else {
+          reticle.visible = false;
+        }
+      }
+
+      if (!placing) {
+        world.step(1 / 60, dt, 5);
+        for (const o of pins.concat(balls)) {
+          o.mesh.position.copy(o.body.position);
+          o.mesh.quaternion.copy(o.body.quaternion);
+        }
+        if ((scoreTick += dt) > 0.2) { scoreTick = 0; updateScore(); }
+      }
+
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

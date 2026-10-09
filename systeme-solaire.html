@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>WebXR AR – Système solaire</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+    #intro { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 8px; }
+    #intro h1 { margin: 0; font-size: 1.6rem; }
+    #intro p { margin: 0; opacity: .75; max-width: 32em; }
+
+    /* DOM Overlay : affiché par-dessus le flux caméra pendant la session AR */
+    #overlay { display: none; position: absolute; inset: 0; pointer-events: none; }
+    #overlay.active { display: block; }
+    #hint { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 999px; font-size: .95rem; white-space: nowrap; }
+    #controls { position: absolute; bottom: 24px; left: 0; right: 0; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 0 16px; pointer-events: auto; }
+    #controls button { background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.35); border-radius: 12px; padding: 10px 14px; font-size: .95rem; }
+    #controls button:active { background: rgba(255,255,255,.25); }
+    #speed { position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); font-size: .85rem; opacity: .8; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="intro">
+    <h1>🪐 Système solaire en AR</h1>
+    <p>Visez une surface (table, sol), puis touchez l'écran pour y poser le système solaire.<br />Tournez autour pour l'explorer.</p>
+  </div>
+
+  <div id="overlay">
+    <div id="hint">Visez une surface…</div>
+    <div id="speed">Vitesse ×1</div>
+    <div id="controls">
+      <button id="slower">⏪</button>
+      <button id="pause">⏸</button>
+      <button id="faster">⏩</button>
+      <button id="smaller">➖</button>
+      <button id="bigger">➕</button>
+      <button id="labels">🏷️ Noms</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+    // ---------- Renderer / scène ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+
+    // ---------- Bouton AR (hit-test requis, dom-overlay optionnel) ----------
+    const overlay = document.getElementById('overlay');
+    document.body.appendChild(ARButton.createButton(renderer, {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: overlay },
+    }));
+
+    // ---------- Réticule ----------
+    const reticle = new THREE.Mesh(
+      new THREE.RingGeometry(0.04, 0.05, 32).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
+    );
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    scene.add(reticle);
+
+    // ---------- Textures procédurales ----------
+    function bandTexture(colors, { bands = 24, noise = 0.08 } = {}) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 128;
+      const g = c.getContext('2d');
+      for (let i = 0; i < bands; i++) {
+        const col = new THREE.Color(colors[i % colors.length]);
+        col.offsetHSL(0, 0, (Math.random() - 0.5) * noise);
+        g.fillStyle = col.getStyle();
+        const y = (i / bands) * c.height;
+        g.fillRect(0, y, c.width, c.height / bands + 1);
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function speckleTexture(base, spots, count = 400) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 128;
+      const g = c.getContext('2d');
+      g.fillStyle = base; g.fillRect(0, 0, c.width, c.height);
+      for (let i = 0; i < count; i++) {
+        g.fillStyle = spots[i % spots.length];
+        g.globalAlpha = 0.25 + Math.random() * 0.5;
+        g.beginPath();
+        g.arc(Math.random() * c.width, Math.random() * c.height, 1 + Math.random() * 6, 0, Math.PI * 2);
+        g.fill();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function earthTexture() {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 128;
+      const g = c.getContext('2d');
+      g.fillStyle = '#1d4f91'; g.fillRect(0, 0, c.width, c.height);
+      for (let i = 0; i < 14; i++) { // "continents"
+        g.fillStyle = i % 3 ? '#3f8f3a' : '#a08a52';
+        g.beginPath();
+        g.ellipse(Math.random() * c.width, 20 + Math.random() * 88, 10 + Math.random() * 30, 6 + Math.random() * 18, Math.random() * Math.PI, 0, Math.PI * 2);
+        g.fill();
+      }
+      g.fillStyle = '#f4f8ff'; // calottes polaires
+      g.fillRect(0, 0, c.width, 8); g.fillRect(0, c.height - 8, c.width, 8);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    function glowTexture(inner, outer) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const g = c.getContext('2d');
+      const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+      grad.addColorStop(0, inner);
+      grad.addColorStop(0.35, outer);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+      return new THREE.CanvasTexture(c);
+    }
+
+    function labelSprite(text) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 64;
+      const g = c.getContext('2d');
+      g.font = 'bold 36px system-ui, sans-serif';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.lineWidth = 6; g.strokeStyle = 'rgba(0,0,0,.8)';
+      g.strokeText(text, 128, 32);
+      g.fillStyle = '#fff'; g.fillText(text, 128, 32);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthWrite: false }));
+      sprite.scale.set(0.08, 0.02, 1);
+      return sprite;
+    }
+
+    // ---------- Système solaire ----------
+    // Distances et tailles en mètres (échelle "jolie", pas réaliste).
+    // Les périodes sont compressées (racine carrée) pour que Neptune bouge pendant la démo.
+    const PLANETS = [
+      { name: 'Mercure', r: 0.11, size: 0.008, period: 0.24, tex: () => speckleTexture('#8c8680', ['#5e5a55', '#b5aea6']) },
+      { name: 'Vénus',   r: 0.15, size: 0.014, period: 0.62, tex: () => bandTexture(['#e8c98a', '#d9b46c', '#f0d9a6'], { bands: 10 }) },
+      { name: 'Terre',   r: 0.20, size: 0.015, period: 1.00, tex: earthTexture, moon: true },
+      { name: 'Mars',    r: 0.25, size: 0.010, period: 1.88, tex: () => speckleTexture('#b5532c', ['#7a3218', '#d9824f']) },
+      { name: 'Jupiter', r: 0.34, size: 0.035, period: 11.86, tex: () => bandTexture(['#d8b48a', '#a8774e', '#efe0c4', '#c48d5d']) },
+      { name: 'Saturne', r: 0.43, size: 0.030, period: 29.46, tex: () => bandTexture(['#e6d3a3', '#cdb27a', '#f2e6c2'], { bands: 16 }), ring: true },
+      { name: 'Uranus',  r: 0.51, size: 0.020, period: 84.0, tex: () => bandTexture(['#a6e0e8', '#93d3dd'], { bands: 6, noise: 0.03 }), tilt: 98 },
+      { name: 'Neptune', r: 0.58, size: 0.019, period: 164.8, tex: () => bandTexture(['#3f63d9', '#3456c4', '#5a7ce6'], { bands: 8 }) },
+    ];
+
+    const system = new THREE.Group();
+    system.visible = false;
+    scene.add(system);
+
+    // Le système "flotte" un peu au-dessus de la surface détectée
+    const content = new THREE.Group();
+    content.position.y = 0.15;
+    system.add(content);
+
+    // Soleil + halo + lumière
+    const sun = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 48, 32),
+      new THREE.MeshBasicMaterial({ map: speckleTexture('#ffb12e', ['#ffdd55', '#ff7b1a'], 900) })
+    );
+    content.add(sun);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTexture('rgba(255,230,150,1)', 'rgba(255,140,30,0.35)'),
+      blending: THREE.AdditiveBlending, depthWrite: false, transparent: true,
+    }));
+    glow.scale.set(0.32, 0.32, 1);
+    content.add(glow);
+    const sunLight = new THREE.PointLight(0xfff2dd, 3, 0, 0); // decay 0 : éclaire toute la scène à petite échelle
+    content.add(sunLight);
+
+    const labels = [labelSprite('Soleil')];
+    labels[0].position.y = 0.085;
+    content.add(labels[0]);
+
+    const planets = PLANETS.map((p) => {
+      // Orbite
+      const orbitPts = new THREE.EllipseCurve(0, 0, p.r, p.r).getPoints(128).map((v) => new THREE.Vector3(v.x, 0, v.y));
+      const orbit = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(orbitPts),
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 })
+      );
+      content.add(orbit);
+
+      // pivot (révolution) -> holder (position sur l'orbite) -> mesh (rotation propre)
+      const pivot = new THREE.Group();
+      pivot.rotation.y = Math.random() * Math.PI * 2;
+      content.add(pivot);
+      const holder = new THREE.Group();
+      holder.position.x = p.r;
+      pivot.add(holder);
+
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(p.size, 32, 20),
+        new THREE.MeshStandardMaterial({ map: p.tex(), roughness: 0.9, metalness: 0 })
+      );
+      if (p.tilt) mesh.rotation.z = THREE.MathUtils.degToRad(p.tilt);
+      holder.add(mesh);
+
+      if (p.ring) {
+        const inner = p.size * 1.3, outer = p.size * 2.3;
+        const ringGeo = new THREE.RingGeometry(inner, outer, 96, 1);
+        // UV radiales pour que la texture fasse des anneaux concentriques
+        const pos = ringGeo.attributes.position, uv = ringGeo.attributes.uv, v = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i);
+          uv.setXY(i, (v.length() - inner) / (outer - inner), 0.5);
+        }
+        const ringTex = bandTexture(['#d9c79a', '#a8936a', '#efe2bf', '#7d6c4f'], { bands: 30 });
+        ringTex.rotation = Math.PI / 2; ringTex.center.set(0.5, 0.5);
+        const ring = new THREE.Mesh(ringGeo, new THREE.MeshStandardMaterial({
+          map: ringTex, side: THREE.DoubleSide, transparent: true, opacity: 0.85, roughness: 1,
+        }));
+        ring.rotation.x = -Math.PI / 2 + THREE.MathUtils.degToRad(27);
+        holder.add(ring);
+      }
+
+      let moonPivot = null;
+      if (p.moon) {
+        moonPivot = new THREE.Group();
+        holder.add(moonPivot);
+        const moon = new THREE.Mesh(
+          new THREE.SphereGeometry(0.004, 16, 12),
+          new THREE.MeshStandardMaterial({ map: speckleTexture('#9a9a9a', ['#6f6f6f', '#c4c4c4']), roughness: 1 })
+        );
+        moon.position.x = 0.028;
+        moonPivot.add(moon);
+      }
+
+      const label = labelSprite(p.name);
+      label.position.y = p.size + 0.018;
+      holder.add(label);
+      labels.push(label);
+
+      return { ...p, pivot, mesh, moonPivot, speed: 1 / Math.sqrt(p.period) };
+    });
+
+    // ---------- UI (DOM overlay) ----------
+    const hint = document.getElementById('hint');
+    const speedLabel = document.getElementById('speed');
+    let timeScale = 1, paused = false, showLabels = true;
+
+    const updateSpeed = () => { speedLabel.textContent = paused ? 'En pause' : `Vitesse ×${timeScale}`; };
+    const btn = (id, fn) => document.getElementById(id).addEventListener('click', fn);
+    btn('slower', () => { timeScale = Math.max(0.25, timeScale / 2); updateSpeed(); });
+    btn('faster', () => { timeScale = Math.min(16, timeScale * 2); updateSpeed(); });
+    btn('pause', (e) => { paused = !paused; e.target.textContent = paused ? '▶️' : '⏸'; updateSpeed(); });
+    btn('smaller', () => system.scale.multiplyScalar(1 / 1.25));
+    btn('bigger', () => system.scale.multiplyScalar(1.25));
+    btn('labels', () => { showLabels = !showLabels; labels.forEach((l) => (l.visible = showLabels)); });
+
+    // Un tap sur un bouton du DOM overlay ne doit pas déclencher un "select" XR (et donc déplacer le système)
+    document.getElementById('controls').addEventListener('beforexrselect', (e) => e.preventDefault());
+
+    // ---------- Interaction : poser / déplacer le système ----------
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (!reticle.visible) return;
+      reticle.matrix.decompose(system.position, system.quaternion, new THREE.Vector3());
+      // Orienter le système face à l'utilisateur (rotation autour de Y uniquement)
+      const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      system.rotation.set(0, Math.atan2(camPos.x - system.position.x, camPos.z - system.position.z), 0);
+      system.visible = true;
+      hint.textContent = 'Touchez à nouveau pour déplacer';
+    });
+    scene.add(controller);
+
+    // ---------- Hit-test ----------
+    let hitTestSource = null;
+    renderer.xr.addEventListener('sessionstart', async () => {
+      document.getElementById('intro').style.display = 'none';
+      overlay.classList.add('active');
+      const session = renderer.xr.getSession();
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+    });
+    renderer.xr.addEventListener('sessionend', () => {
+      hitTestSource?.cancel();
+      hitTestSource = null;
+      overlay.classList.remove('active');
+      document.getElementById('intro').style.display = '';
+      system.visible = false;
+      reticle.visible = false;
+      hint.textContent = 'Visez une surface…';
+    });
+
+    // ---------- Boucle de rendu ----------
+    const clock = new THREE.Clock();
+    let simTime = 0;
+
+    renderer.setAnimationLoop((timestamp, frame) => {
+      const dt = clock.getDelta();
+
+      if (frame && hitTestSource) {
+        const hits = frame.getHitTestResults(hitTestSource);
+        if (hits.length) {
+          const pose = hits[0].getPose(renderer.xr.getReferenceSpace());
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+          if (!system.visible) hint.textContent = 'Touchez pour poser le système solaire';
+        } else {
+          reticle.visible = false;
+        }
+      }
+
+      if (!paused) simTime += dt * timeScale;
+      const EARTH_YEAR = 10; // secondes pour une révolution de la Terre à vitesse ×1
+      const angle = (simTime / EARTH_YEAR) * Math.PI * 2;
+      sun.rotation.y = angle * 0.1;
+      for (const p of planets) {
+        p.pivot.rotation.y = angle * p.speed + p.r * 40; // décalage de départ
+        p.mesh.rotation.y = angle * 6;
+        if (p.moonPivot) p.moonPivot.rotation.y = angle * 4;
+      }
+
+      renderer.render(scene, camera);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

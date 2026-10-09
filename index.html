@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Démos WebXR AR</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; background: #111; color: #fff; font-family: system-ui, sans-serif; }
+    main { min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 24px 16px; text-align: center; }
+    h1 { margin: 0; font-size: 1.8rem; }
+    p { margin: 0; opacity: .7; }
+    nav { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 360px; }
+    a { display: block; padding: 20px; border-radius: 16px; border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); color: #fff; text-decoration: none; font-size: 1.3rem; font-weight: 600; }
+    a:active { background: rgba(255,255,255,.2); }
+    a small { display: block; margin-top: 6px; font-size: .85rem; font-weight: 400; opacity: .7; }
+    #support { font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Démos WebXR AR</h1>
+    <p id="support">Vérification du support WebXR…</p>
+    <nav>
+      <a href="systeme-solaire.html">🪐 Système solaire<small>Poser le système solaire et tourner autour</small></a>
+      <a href="bowling.html">🎳 Bowling<small>Poser une piste et lancer des boules</small></a>
+    </nav>
+  </main>
+  <script>
+    const support = document.getElementById('support');
+    if (!('xr' in navigator)) {
+      support.textContent = '⚠️ WebXR non disponible dans ce navigateur';
+    } else {
+      navigator.xr.isSessionSupported('immersive-ar')
+        .then((ok) => { support.textContent = ok ? '✅ immersive-ar supporté' : '⚠️ immersive-ar non supporté sur cet appareil'; })
+        .catch(() => { support.textContent = '⚠️ Impossible de vérifier le support AR'; });
+    }
+  </script>
+</body>
+</html>
